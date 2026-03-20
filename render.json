@@ -1,0 +1,11 @@
+{
+  "type": "web_service",
+  "name": "agent-bank-api",
+  "repo": "github.com/kwickmanagementm3-source/agent-bank",
+  "branch": "main",
+  "buildCommand": "",
+  "startCommand": "node server.js",
+  "envVars": [
+    {"key": "JWT_SECRET", "value": "agent-bank-secret-2026"}
+  ]
+}

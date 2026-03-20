@@ -83,7 +83,7 @@ const CATEGORIES = [
   { id: 'other', label: '📦 Other', style: styles.catOther }
 ]
 
-const API = import.meta.env.VITE_API_URL || ''
+const API = 'https://agent-bank-api.onrender.com'
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token'))
@@ -151,17 +151,27 @@ function App() {
 
   const handleAuth = async (e) => {
     e.preventDefault()
-    const res = await fetch(`${API}/${isRegister ? 'register' : 'login'}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    })
-    const data = await res.json()
-    if (data.token) {
-      localStorage.setItem('token', data.token)
-      setToken(data.token)
-    } else {
-      alert(data.error)
+    const url = `${API}/${isRegister ? 'register' : 'login'}`
+    alert('Trying: ' + url)
+    try {
+      const res = await fetch(`${API}/${isRegister ? 'register' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      })
+      if (!res.ok) {
+        alert('Server error: ' + res.status)
+        return
+      }
+      const data = await res.json()
+      if (data.token) {
+        localStorage.setItem('token', data.token)
+        setToken(data.token)
+      } else {
+        alert(data.error || 'Registration failed')
+      }
+    } catch (err) {
+      alert('Error: ' + err.message)
     }
   }
 
