@@ -3,94 +3,140 @@ import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { v4 as uuidv4 } from 'uuid'
-import pg from 'pg'
+import fs from 'fs'
+import path from 'path'
 
 const app = express()
 const PORT = process.env.PORT || 3001
 const JWT_SECRET = process.env.JWT_SECRET || 'agent-bank-secret-2026'
+const DATA_FILE = path.join(process.cwd(), 'data.json')
 
-const { Pool } = pg
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-})
-
-// Initialize database tables
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id UUID PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS balances (
-      user_id UUID PRIMARY KEY REFERENCES users(id),
-      amount DECIMAL(15,2) DEFAULT 0
-    )
-  `)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id UUID PRIMARY KEY,
-      user_id UUID REFERENCES users(id),
-      name TEXT NOT NULL,
-      agent_id TEXT NOT NULL,
-      api_key TEXT,
-      status TEXT DEFAULT 'connected',
-      balance DECIMAL(15,2) DEFAULT 0,
-      daily_limit DECIMAL(15,2) DEFAULT 100,
-      transaction_limit DECIMAL(15,2) DEFAULT 50,
-      category TEXT DEFAULT 'other',
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS transactions (
-      id UUID PRIMARY KEY,
-      agent_id UUID REFERENCES agents(id),
-      type TEXT NOT NULL,
-      amount DECIMAL(15,2) NOT NULL,
-      source TEXT,
-      destination TEXT,
-      status TEXT,
-      reason TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `)
-  console.log('Database initialized')
+// Load or initialize data
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'))
+    }
+  } catch (e) { console.error('Error loading data:', e) }
+  return { users: [], agents: [], transactions: [], balances: {} }
 }
+
+function saveData() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
+}
+
+let data = loadData()
 
 app.use(cors())
 app.use(express.json())
 
-// Routes
-app.post('/api/register', async (req, res) => {
-  const { email, password } = req.body
-  if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
-  try {
-    const id = uuidv4()
-    const hash = await bcrypt.hash(password, 10)
-    await pool.query('INSERT INTO users (id, email, password) VALUES ($1, $2, $3)', [id, email, hash])
-    await pool.query('INSERT INTO balances (user_id, amount) VALUES ($1, $2)', [id, 0])
-    const token = jwt.sign({ userId: id }, JWT_SECRET, { expiresIn: '7d' })
-    res.json({ token, user: { id, email } })
-  } catch (e) {
-    res.status(400).json({ error: 'Email already exists' })
-  }
-})
+// Helper functions
+function createUser(email, password) {
+  const id = uuidv4()
+  const user = { id, email, password, created_at: new Date().toISOString() }
+  data.users.push(user)
+  data.balances[id] = 0
+  saveData()
+  return { id, email }
+}
 
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body
-  const result = await pool.query('SELECT * FROM users WHERE email = $1', [email])
-  const user = result.rows[0]
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: 'Invalid credentials' })
+function getUserByEmail(email) {
+  return data.users.find(u => u.email === email)
+}
+
+function getUserById(id) {
+  const u = data.users.find(u => u.id === id)
+  return u ? { id: u.id, email: u.email, created_at: u.created_at } : null
+}
+
+function getUserBalance(userId) {
+  return data.balances[userId] || 0
+}
+
+function updateUserBalance(userId, amount) {
+  data.balances[userId] = (data.balances[userId] || 0) + amount
+  saveData()
+}
+
+function connectAgent(userId, name, agentId, apiKey, category) {
+  const id = uuidv4()
+  const agent = {
+    id, user_id: userId, name, agent_id: agentId,
+    api_key: apiKey || '', status: 'connected', balance: 0,
+    daily_limit: 100, transaction_limit: 50,
+    category: category || 'other', created_at: new Date().toISOString()
   }
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' })
-  res.json({ token, user: { id: user.id, email: user.email } })
-})
+  data.agents.push(agent)
+  saveData()
+  return agent
+}
+
+function getUserAgents(userId) {
+  return data.agents.filter(a => a.user_id === userId)
+}
+
+function getAgentById(id) {
+  return data.agents.find(a => a.id === id)
+}
+
+function getAgentByAgentId(agentId) {
+  return data.agents.find(a => a.agent_id === agentId)
+}
+
+function updateAgentBalance(id, amount) {
+  const a = data.agents.find(a => a.id === id)
+  if (a) { a.balance = (a.balance || 0) + amount; saveData() }
+}
+
+function updateAgentStatus(id, status) {
+  const a = data.agents.find(a => a.id === id)
+  if (a) { a.status = status; saveData() }
+}
+
+function updateAgentRules(id, dl, tl) {
+  const a = data.agents.find(a => a.id === id)
+  if (a) { a.daily_limit = dl || 100; a.transaction_limit = tl || 50; saveData() }
+}
+
+function updateAgentCategory(id, cat) {
+  const a = data.agents.find(a => a.id === id)
+  if (a) { a.category = cat; saveData() }
+}
+
+function createTransaction(agentId, type, amount, source, destination, status, reason) {
+  const id = uuidv4()
+  const tx = { id, agent_id: agentId, type, amount, source, destination, status, reason, created_at: new Date().toISOString() }
+  data.transactions.push(tx)
+  if (status === 'completed') {
+    if (type === 'fund_agent') {
+      updateAgentBalance(agentId, amount)
+      const a = data.agents.find(a => a.id === agentId)
+      if (a) updateUserBalance(a.user_id, -amount)
+    } else if (type === 'agent_spend') {
+      updateAgentBalance(agentId, -amount)
+    }
+  }
+  return tx
+}
+
+function getAgentTransactions(id) {
+  return data.transactions.filter(t => t.agent_id === id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+}
+
+function getUserTransactions(userId) {
+  const uas = getUserAgents(userId)
+  const ids = new Set(uas.map(a => a.id))
+  return data.transactions.filter(t => ids.has(t.agent_id))
+    .map(t => ({ ...t, agent_name: data.agents.find(a => a.id === t.agent_id)?.name }))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+}
+
+function getTodaySpending(id) {
+  const today = new Date().toISOString().split('T')[0]
+  return data.transactions
+    .filter(x => x.agent_id === id && x.type === 'agent_spend' && x.status === 'completed' && x.created_at?.startsWith(today))
+    .reduce((s, x) => s + x.amount, 0)
+}
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1]
@@ -99,155 +145,128 @@ function auth(req, res, next) {
   catch { res.status(401).json({ error: 'Invalid token' }) }
 }
 
-app.get('/api/me', auth, async (req, res) => {
-  const result = await pool.query('SELECT id, email, created_at FROM users WHERE id = $1', [req.userId])
-  res.json(result.rows[0])
+// Routes
+app.post('/api/register', async (req, res) => {
+  const { email, password } = req.body
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
+  const existing = getUserByEmail(email)
+  if (existing) return res.status(400).json({ error: 'Email already exists' })
+  const user = createUser(email, await bcrypt.hash(password, 10))
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' })
+  res.json({ token, user: { id: user.id, email: user.email } })
 })
 
-app.get('/api/balance', auth, async (req, res) => {
-  const result = await pool.query('SELECT amount FROM balances WHERE user_id = $1', [req.userId])
-  res.json({ balance: parseFloat(result.rows[0]?.amount) || 0 })
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body
+  const user = getUserByEmail(email)
+  if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' })
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' })
+  res.json({ token, user: { id: user.id, email: user.email } })
 })
 
-app.post('/api/fund', auth, async (req, res) => {
+app.get('/api/me', auth, (req, res) => res.json(getUserById(req.userId)))
+app.get('/api/balance', auth, (req, res) => res.json({ balance: getUserBalance(req.userId) }))
+
+app.post('/api/fund', auth, (req, res) => {
   const { amount } = req.body
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Valid amount required' })
-  await pool.query('UPDATE balances SET amount = amount + $1 WHERE user_id = $2', [amount, req.userId])
-  const result = await pool.query('SELECT amount FROM balances WHERE user_id = $1', [req.userId])
-  res.json({ balance: parseFloat(result.rows[0].amount) })
+  updateUserBalance(req.userId, amount)
+  res.json({ balance: getUserBalance(req.userId) })
 })
 
-app.get('/api/agents', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE user_id = $1', [req.userId])
-  res.json(result.rows.map(a => ({ ...a, balance: parseFloat(a.balance) })))
-})
-
-app.post('/api/agents', auth, async (req, res) => {
+app.get('/api/agents', auth, (req, res) => res.json(getUserAgents(req.userId)))
+app.post('/api/agents', auth, (req, res) => {
   const { name, agentId, apiKey, category } = req.body
   if (!name || !agentId) return res.status(400).json({ error: 'Name and Agent ID required' })
-  const id = uuidv4()
-  await pool.query(
-    'INSERT INTO agents (id, user_id, name, agent_id, api_key, category) VALUES ($1, $2, $3, $4, $5, $6)',
-    [id, req.userId, name, agentId, apiKey || '', category || 'other']
-  )
-  res.json({ id, user_id: req.userId, name, agent_id: agentId, api_key: apiKey, status: 'connected', balance: 0 })
+  res.json(connectAgent(req.userId, name, agentId, apiKey, category))
 })
 
-app.get('/api/transactions', auth, async (req, res) => {
-  const agt = await pool.query('SELECT id, name FROM agents WHERE user_id = $1', [req.userId])
-  const agentMap = new Map(agt.rows.map(a => [a.id, a.name]))
-  const ids = agt.rows.map(a => a.id)
-  if (ids.length === 0) return res.json([])
-  const result = await pool.query(`SELECT * FROM transactions WHERE agent_id = ANY($1) ORDER BY created_at DESC`, [ids])
-  res.json(result.rows.map(t => ({ ...t, agent_name: agentMap.get(t.agent_id), amount: parseFloat(t.amount) })))
-})
+app.get('/api/transactions', auth, (req, res) => res.json(getUserTransactions(req.userId)))
 
-app.get('/api/stats', auth, async (req, res) => {
-  const bal = await pool.query('SELECT amount FROM balances WHERE user_id = $1', [req.userId])
-  const agts = await pool.query('SELECT * FROM agents WHERE user_id = $1', [req.userId])
-  const ids = agts.rows.map(a => a.id)
-  const txs = ids.length > 0 ? await pool.query(`SELECT * FROM transactions WHERE agent_id = ANY($1)`, [ids]) : { rows: [] }
+app.get('/api/stats', auth, (req, res) => {
+  const agts = getUserAgents(req.userId)
+  const txs = getUserTransactions(req.userId)
+  const bal = getUserBalance(req.userId)
   const today = new Date().toISOString().split('T')[0]
-  const todaySpend = txs.rows
-    .filter(t => t.type === 'agent_spend' && t.status === 'completed' && t.created_at?.startsWith(today))
-    .reduce((s, t) => s + parseFloat(t.amount), 0)
   res.json({
-    balance: parseFloat(bal.rows[0]?.amount) || 0,
-    totalAgentBalance: agts.rows.reduce((s, a) => s + parseFloat(a.balance), 0),
-    agentCount: agts.rows.length,
-    totalTransactions: txs.rows.length,
-    todaySpend,
-    activeAgents: agts.rows.filter(a => a.status === 'connected').length
+    balance: bal,
+    totalAgentBalance: agts.reduce((s, a) => s + a.balance, 0),
+    agentCount: agts.length,
+    totalTransactions: txs.length,
+    todaySpend: txs.filter(t => t.type === 'agent_spend' && t.status === 'completed' && t.created_at?.startsWith(today)).reduce((s, t) => s + t.amount, 0),
+    activeAgents: agts.filter(a => a.status === 'connected').length
   })
 })
 
 // Single agent routes
-app.get('/api/agents/:id', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
-  res.json({ ...result.rows[0], balance: parseFloat(result.rows[0].balance) })
+app.get('/api/agents/:id', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+  res.json(agent)
 })
 
-app.put('/api/agents/:id/status', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
-  await pool.query('UPDATE agents SET status = $1 WHERE id = $2', [req.body.status, req.params.id])
+app.put('/api/agents/:id/status', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+  updateAgentStatus(req.params.id, req.body.status)
   res.json({ success: true })
 })
 
-app.put('/api/agents/:id/rules', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
-  await pool.query('UPDATE agents SET daily_limit = $1, transaction_limit = $2 WHERE id = $3', 
-    [req.body.dailyLimit || 100, req.body.transactionLimit || 50, req.params.id])
+app.put('/api/agents/:id/rules', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+  updateAgentRules(req.params.id, req.body.dailyLimit, req.body.transactionLimit)
   res.json({ success: true })
 })
 
-app.put('/api/agents/:id/category', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
-  await pool.query('UPDATE agents SET category = $1 WHERE id = $2', [req.body.category, req.params.id])
+app.put('/api/agents/:id/category', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+  updateAgentCategory(req.params.id, req.body.category)
   res.json({ success: true })
 })
 
-app.post('/api/agents/:id/fund', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+app.post('/api/agents/:id/fund', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
   const { amount } = req.body
-  const bal = await pool.query('SELECT amount FROM balances WHERE user_id = $1', [req.userId])
-  if (parseFloat(bal.rows[0].amount) < amount) return res.status(400).json({ error: 'Insufficient balance' })
-  const txId = uuidv4()
-  await pool.query('INSERT INTO transactions (id, agent_id, type, amount, source, destination, status, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-    [txId, req.params.id, 'fund_agent', amount, 'user', 'agent', 'completed', 'User funded agent wallet'])
-  await pool.query('UPDATE balances SET amount = amount - $1 WHERE user_id = $2', [amount, req.userId])
-  await pool.query('UPDATE agents SET balance = balance + $1 WHERE id = $2', [amount, req.params.id])
+  const bal = getUserBalance(req.userId)
+  if (bal < amount) return res.status(400).json({ error: 'Insufficient balance' })
+  createTransaction(req.params.id, 'fund_agent', amount, 'user', 'agent', 'completed', 'User funded agent wallet')
+  updateUserBalance(req.userId, -amount)
+  updateAgentBalance(req.params.id, amount)
   res.json({ success: true })
 })
 
-app.get('/api/agents/:id/transactions', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM agents WHERE id = $1', [req.params.id])
-  if (!result.rows[0] || result.rows[0].user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
-  const txs = await pool.query('SELECT * FROM transactions WHERE agent_id = $1 ORDER BY created_at DESC', [req.params.id])
-  res.json(txs.rows.map(t => ({ ...t, amount: parseFloat(t.amount) })))
+app.get('/api/agents/:id/transactions', auth, (req, res) => {
+  const agent = getAgentById(req.params.id)
+  if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
+  res.json(getAgentTransactions(req.params.id))
 })
 
 // Public spend API
 app.post('/api/agent/spend', async (req, res) => {
   const { agentId, apiKey, amount, reason, destination } = req.body
   if (!agentId || !amount || !reason) return res.status(400).json({ error: 'Missing required fields' })
-  const result = await pool.query('SELECT * FROM agents WHERE agent_id = $1', [agentId])
-  const agent = result.rows[0]
+  const agent = getAgentByAgentId(agentId)
   if (!agent) return res.status(404).json({ error: 'Agent not found' })
   if (agent.api_key && agent.api_key !== apiKey) return res.status(401).json({ error: 'Invalid API key' })
   if (agent.status !== 'connected') return res.status(400).json({ error: 'Agent is not active' })
-  if (parseFloat(agent.balance) < amount) {
-    const txId = uuidv4()
-    await pool.query('INSERT INTO transactions (id, agent_id, type, amount, source, destination, status, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      [txId, agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'rejected', reason])
+  if (agent.balance < amount) {
+    createTransaction(agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'rejected', reason)
     return res.status(400).json({ error: 'Insufficient balance' })
   }
-  const today = new Date().toISOString().split('T')[0]
-  const todayTxs = await pool.query(
-    'SELECT SUM(amount) as total FROM transactions WHERE agent_id = $1 AND type = $2 AND status = $3 AND created_at::text LIKE $4',
-    [agent.id, 'agent_spend', 'completed', today + '%']
-  )
-  const todaySpend = parseFloat(todayTxs.rows[0]?.total) || 0
-  if (todaySpend + amount > parseFloat(agent.daily_limit)) {
-    const txId = uuidv4()
-    await pool.query('INSERT INTO transactions (id, agent_id, type, amount, source, destination, status, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      [txId, agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'rejected', reason])
+  const todaySpend = getTodaySpending(agent.id)
+  if (todaySpend + amount > agent.daily_limit) {
+    createTransaction(agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'rejected', reason)
     return res.status(400).json({ error: 'Daily limit exceeded' })
   }
-  if (amount > parseFloat(agent.transaction_limit)) {
-    const txId = uuidv4()
-    await pool.query('INSERT INTO transactions (id, agent_id, type, amount, source, destination, status, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      [txId, agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'pending', reason])
+  if (amount > agent.transaction_limit) {
+    createTransaction(agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'pending', reason)
     return res.status(202).json({ status: 'pending', message: 'Amount exceeds transaction limit' })
   }
-  const txId = uuidv4()
-  await pool.query('INSERT INTO transactions (id, agent_id, type, amount, source, destination, status, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-    [txId, agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'completed', reason])
-  await pool.query('UPDATE agents SET balance = balance - $1 WHERE id = $2', [amount, agent.id])
+  createTransaction(agent.id, 'agent_spend', amount, 'agent', destination || 'system', 'completed', reason)
+  updateAgentBalance(agent.id, -amount)
   res.json({ success: true, message: 'Transaction completed' })
 })
 
@@ -259,12 +278,18 @@ app.use((err, req, res, next) => {
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err)
+  saveData()
 })
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason)
+  saveData()
 })
 
-initDB().then(() => {
-  app.listen(PORT, () => console.log('Agent Bank API running on port ' + PORT))
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, saving data before exit...')
+  saveData()
+  process.exit(0)
 })
+
+app.listen(PORT, () => console.log('Agent Bank API running on port ' + PORT))
