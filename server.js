@@ -2,7 +2,6 @@ import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import { v4 as uuidv4 } from 'uuid'
 import Stripe from 'stripe'
 import fs from 'fs'
 import path from 'path'
@@ -11,32 +10,41 @@ const app = express()
 const PORT = process.env.PORT || 3001
 const JWT_SECRET = process.env.JWT_SECRET || 'agent-bank-secret-2026'
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY
-const MARKUP_PERCENT = parseInt(process.env.MARKUP_PERCENT || '20') // Default 20% markup
-const DATA_FILE = path.join(process.cwd(), 'data.json')
+const MARKUP_PERCENT = parseInt(process.env.MARKUP_PERCENT || '20')
+const DB_PATH = path.join(process.cwd(), 'data.json')
 
 // Initialize Stripe
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null
 
-// Load or initialize data
-function loadData() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'))
-    }
-  } catch (e) { console.error('Error loading data:', e) }
-  return { users: [], agents: [], transactions: [], balances: {}, payments: [] }
+// Initialize file if it doesn't exist
+function initDB() {
+  if (!fs.existsSync(DB_PATH)) {
+    fs.writeFileSync(DB_PATH, JSON.stringify({ users: [], agents: [], transactions: [], balances: {} }, null, 2))
+  }
 }
 
-function saveData() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
+// Load data
+function loadData() {
+  try {
+    if (fs.existsSync(DB_PATH)) {
+      return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'))
+    }
+  } catch (e) { console.error('Error loading data:', e) }
+  return { users: [], agents: [], transactions: [], balances: {} }
+}
+
+// Save data
+function saveData(data) {
+  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2))
 }
 
 let data = loadData()
+initDB()
 
 app.use(cors())
 app.use(express.json())
 
-// Stripe webhook (must be before express.json())
+// Stripe webhook
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: 'Stripe not configured' })
   
@@ -53,18 +61,14 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object
     const userId = session.client_reference_id
-    const amount = session.amount_total / 100 // Convert from cents
+    const amount = session.amount_total / 100
     
     if (userId && amount > 0) {
+      data = loadData()
       data.balances[userId] = (data.balances[userId] || 0) + amount
-      data.payments.push({
-        id: session.id,
-        user_id: userId,
-        amount: amount,
-        status: 'completed',
-        created_at: new Date().toISOString()
-      })
-      saveData()
+      data.payments = data.payments || []
+      data.payments.push({ id: session.id, user_id: userId, amount, status: 'completed', created_at: new Date().toISOString() })
+      saveData(data)
       console.log(`Payment completed: $${amount} for user ${userId}`)
     }
   }
@@ -74,80 +78,94 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
 // Helper functions
 function createUser(email, password) {
-  const id = uuidv4()
+  const id = Date.now().toString()
   const user = { id, email, password, created_at: new Date().toISOString() }
+  data = loadData()
   data.users.push(user)
   data.balances[id] = 0
-  saveData()
+  saveData(data)
   return { id, email }
 }
 
 function getUserByEmail(email) {
+  data = loadData()
   return data.users.find(u => u.email === email)
 }
 
 function getUserById(id) {
+  data = loadData()
   const u = data.users.find(u => u.id === id)
   return u ? { id: u.id, email: u.email, created_at: u.created_at } : null
 }
 
 function getUserBalance(userId) {
+  data = loadData()
   return data.balances[userId] || 0
 }
 
 function updateUserBalance(userId, amount) {
+  data = loadData()
   data.balances[userId] = (data.balances[userId] || 0) + amount
-  saveData()
+  saveData(data)
 }
 
 function connectAgent(userId, name, agentId, apiKey, category) {
-  const id = uuidv4()
+  const id = Date.now().toString()
   const agent = {
     id, user_id: userId, name, agent_id: agentId,
     api_key: apiKey || '', status: 'connected', balance: 0,
     daily_limit: 100, transaction_limit: 50,
     category: category || 'other', created_at: new Date().toISOString()
   }
+  data = loadData()
   data.agents.push(agent)
-  saveData()
+  saveData(data)
   return agent
 }
 
 function getUserAgents(userId) {
+  data = loadData()
   return data.agents.filter(a => a.user_id === userId)
 }
 
 function getAgentById(id) {
+  data = loadData()
   return data.agents.find(a => a.id === id)
 }
 
 function getAgentByAgentId(agentId) {
+  data = loadData()
   return data.agents.find(a => a.agent_id === agentId)
 }
 
 function updateAgentBalance(id, amount) {
+  data = loadData()
   const a = data.agents.find(a => a.id === id)
-  if (a) { a.balance = (a.balance || 0) + amount; saveData() }
+  if (a) { a.balance = (a.balance || 0) + amount; saveData(data) }
 }
 
 function updateAgentStatus(id, status) {
+  data = loadData()
   const a = data.agents.find(a => a.id === id)
-  if (a) { a.status = status; saveData() }
+  if (a) { a.status = status; saveData(data) }
 }
 
 function updateAgentRules(id, dl, tl) {
+  data = loadData()
   const a = data.agents.find(a => a.id === id)
-  if (a) { a.daily_limit = dl || 100; a.transaction_limit = tl || 50; saveData() }
+  if (a) { a.daily_limit = dl || 100; a.transaction_limit = tl || 50; saveData(data) }
 }
 
 function updateAgentCategory(id, cat) {
+  data = loadData()
   const a = data.agents.find(a => a.id === id)
-  if (a) { a.category = cat; saveData() }
+  if (a) { a.category = cat; saveData(data) }
 }
 
 function createTransaction(agentId, type, amount, source, destination, status, reason) {
-  const id = uuidv4()
+  const id = Date.now().toString()
   const tx = { id, agent_id: agentId, type, amount, source, destination, status, reason, created_at: new Date().toISOString() }
+  data = loadData()
   data.transactions.push(tx)
   if (status === 'completed') {
     if (type === 'fund_agent') {
@@ -158,14 +176,17 @@ function createTransaction(agentId, type, amount, source, destination, status, r
       updateAgentBalance(agentId, -amount)
     }
   }
+  saveData(data)
   return tx
 }
 
 function getAgentTransactions(id) {
+  data = loadData()
   return data.transactions.filter(t => t.agent_id === id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
 }
 
 function getUserTransactions(userId) {
+  data = loadData()
   const uas = getUserAgents(userId)
   const ids = new Set(uas.map(a => a.id))
   return data.transactions.filter(t => ids.has(t.agent_id))
@@ -174,6 +195,7 @@ function getUserTransactions(userId) {
 }
 
 function getTodaySpending(id) {
+  data = loadData()
   const today = new Date().toISOString().split('T')[0]
   return data.transactions
     .filter(x => x.agent_id === id && x.type === 'agent_spend' && x.status === 'completed' && x.created_at?.startsWith(today))
@@ -209,19 +231,17 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', auth, (req, res) => res.json(getUserById(req.userId)))
 app.get('/api/balance', auth, (req, res) => res.json({ balance: getUserBalance(req.userId) }))
 
-app.post('/api/fund', auth, async (req, res) => {
+app.post('/api/fund', auth, (req, res) => {
   const { amount } = req.body
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Valid amount required' })
   updateUserBalance(req.userId, amount)
   res.json({ balance: getUserBalance(req.userId) })
 })
 
-// Stripe checkout session
 app.post('/api/create-checkout-session', auth, async (req, res) => {
   const { amount } = req.body
   
   if (!stripe) {
-    // Demo mode - just add funds without payment
     updateUserBalance(req.userId, amount)
     return res.json({ 
       success: true, 
@@ -235,7 +255,6 @@ app.post('/api/create-checkout-session', auth, async (req, res) => {
     return res.status(400).json({ error: 'Valid amount required' })
   }
   
-  // Calculate amount with markup (convert to cents for Stripe)
   const amountInCents = Math.round(amount * 100)
   
   try {
@@ -244,10 +263,7 @@ app.post('/api/create-checkout-session', auth, async (req, res) => {
       line_items: [{
         price_data: {
           currency: 'usd',
-          product_data: {
-            name: 'Agent Bank Wallet Funding',
-            description: `Add $${amount.toFixed(2)} to your wallet (${MARKUP_PERCENT}% markup included)`
-          },
+          product_data: { name: 'Agent Bank Wallet Funding' },
           unit_amount: amountInCents
         },
         quantity: 1
@@ -265,7 +281,6 @@ app.post('/api/create-checkout-session', auth, async (req, res) => {
   }
 })
 
-// Get Stripe publishable key (for frontend)
 app.get('/api/stripe-config', auth, (req, res) => {
   res.json({ 
     publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null,
@@ -298,7 +313,6 @@ app.get('/api/stats', auth, (req, res) => {
   })
 })
 
-// Single agent routes
 app.get('/api/agents/:id', auth, (req, res) => {
   const agent = getAgentById(req.params.id)
   if (!agent || agent.user_id !== req.userId) return res.status(404).json({ error: 'Not found' })
@@ -344,7 +358,6 @@ app.get('/api/agents/:id/transactions', auth, (req, res) => {
   res.json(getAgentTransactions(req.params.id))
 })
 
-// Public spend API
 app.post('/api/agent/spend', async (req, res) => {
   const { agentId, apiKey, amount, reason, destination } = req.body
   if (!agentId || !amount || !reason) return res.status(400).json({ error: 'Missing required fields' })
@@ -370,7 +383,6 @@ app.post('/api/agent/spend', async (req, res) => {
   res.json({ success: true, message: 'Transaction completed' })
 })
 
-// Error handlers
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err)
   res.status(500).json({ error: 'Internal server error' })
@@ -378,17 +390,14 @@ app.use((err, req, res, next) => {
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err)
-  saveData()
 })
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason)
-  saveData()
 })
 
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received, saving data before exit...')
-  saveData()
+  console.log('SIGTERM received')
   process.exit(0)
 })
 
@@ -396,7 +405,6 @@ app.listen(PORT, () => {
   console.log('Agent Bank API running on port ' + PORT)
   if (!stripe) {
     console.log('⚠️  Stripe not configured - running in DEMO mode')
-    console.log('   Add STRIPE_SECRET_KEY and STRIPE_PUBLISHABLE_KEY to enable payments')
   } else {
     console.log('💳 Stripe enabled with ' + MARKUP_PERCENT + '% markup')
   }
