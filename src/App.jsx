@@ -229,14 +229,32 @@ function App() {
   }
 
   const addFunds = async () => {
-    const amt = prompt('Amount to add:')
-    if (!amt) return
-    await fetch(`${API}/fund`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ amount: parseFloat(amt) })
-    })
-    fetchData()
+    const amt = prompt('Amount to add (USD):')
+    if (!amt || parseFloat(amt) <= 0) return
+    const amount = parseFloat(amt)
+    
+    try {
+      // Call checkout session endpoint
+      const res = await fetch(`${API}/create-checkout-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ amount })
+      })
+      const data = await res.json()
+      
+      if (data.demo) {
+        // Demo mode - funds added directly
+        alert(data.message)
+        fetchData()
+      } else if (data.url) {
+        // Redirect to Stripe checkout
+        window.location.href = data.url
+      } else {
+        alert(data.error || 'Payment failed')
+      }
+    } catch (err) {
+      alert('Error: ' + err.message)
+    }
   }
 
   const selectAgent = async (agent) => {
