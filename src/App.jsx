@@ -234,23 +234,19 @@ function App() {
     const amount = parseFloat(amt)
     
     try {
-      // Call checkout session endpoint
-      const res = await fetch(`${API}/create-checkout-session`, {
+      // Direct funding in demo mode (skip Stripe)
+      const res = await fetch(`${API}/fund`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ amount })
       })
       const data = await res.json()
       
-      if (data.demo) {
-        // Demo mode - funds added directly
-        alert(data.message)
+      if (data.balance !== undefined) {
+        alert(`Added $${amount} to your wallet!`)
         fetchData()
-      } else if (data.url) {
-        // Redirect to Stripe checkout
-        window.location.href = data.url
       } else {
-        alert(data.error || 'Payment failed')
+        alert(data.error || 'Failed to add funds')
       }
     } catch (err) {
       alert('Error: ' + err.message)
