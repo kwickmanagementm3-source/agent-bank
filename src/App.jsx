@@ -83,7 +83,7 @@ const CATEGORIES = [
   { id: 'other', label: '📦 Other', style: styles.catOther }
 ]
 
-const API = 'https://agent-bank-api.onrender.com'
+const API = 'https://agent-bank-api.onrender.com/api'
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token'))
@@ -151,8 +151,6 @@ function App() {
 
   const handleAuth = async (e) => {
     e.preventDefault()
-    const url = `${API}/${isRegister ? 'register' : 'login'}`
-    alert('Trying: ' + url)
     try {
       const res = await fetch(`${API}/${isRegister ? 'register' : 'login'}`, {
         method: 'POST',
